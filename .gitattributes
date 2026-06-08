@@ -1,0 +1,2 @@
+# LFS tracking removed - models downloaded from HuggingFace at runtime
+*.sh text eol=lf
