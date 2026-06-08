@@ -80,6 +80,12 @@ CHARACTER_IMAGE_ROOT = (Path(__file__).parent.parent.parent / "storage" / "chara
 DEFAULT_CHARACTER_IMAGE_VARIANT = "default"
 COMIC_PAGE_BATCH_CONCURRENCY_DEFAULT = 2
 COMIC_PAGE_BATCH_CONCURRENCY_MAX = 6
+COMIC_IMAGE_GENERATION_TIMEOUT_SECONDS = 900.0
+COMIC_IMAGE_CONNECT_TIMEOUT_SECONDS = 15.0
+COMIC_IMAGE_WRITE_TIMEOUT_SECONDS = 60.0
+COMIC_IMAGE_POOL_TIMEOUT_SECONDS = 30.0
+COMIC_IMAGE_FIRST_PROMPT_MAX_ATTEMPTS = 4
+COMIC_IMAGE_REWRITE_PROMPT_MAX_ATTEMPTS = 2
 ORPHANED_BATCH_TASK_MESSAGE = "服务已重启，后台批量任务已中断，请重新启动任务"
 _STATE_LOCKS: dict[str, RLock] = {}
 _STATE_LOCKS_GUARD = RLock()
@@ -2464,7 +2470,13 @@ async def _call_hermes_image_api(
     base_candidates = normalize_image_api_base_urls(configured_base_url)
     logger.info("漫画页使用图片接口候选路径: %s", base_candidates)
 
-    async with httpx.AsyncClient(timeout=None) as client:
+    timeout = httpx.Timeout(
+        COMIC_IMAGE_GENERATION_TIMEOUT_SECONDS,
+        connect=COMIC_IMAGE_CONNECT_TIMEOUT_SECONDS,
+        write=COMIC_IMAGE_WRITE_TIMEOUT_SECONDS,
+        pool=COMIC_IMAGE_POOL_TIMEOUT_SECONDS,
+    )
+    async with httpx.AsyncClient(timeout=timeout) as client:
         last_exc: Exception | None = None
         for candidate_url in base_candidates or [configured_base_url]:
             try:
@@ -2511,7 +2523,11 @@ async def _generate_comic_image_with_rewrite_retry(
     errors: list[dict[str, Any]] = []
     attempts = _comic_prompt_attempts(prompt_text, image_text_language=image_text_language)
     for prompt_index, (rewrite_mode, candidate_prompt) in enumerate(attempts):
-        max_capacity_attempts = 2 if prompt_index == 0 else 1
+        max_capacity_attempts = (
+            COMIC_IMAGE_FIRST_PROMPT_MAX_ATTEMPTS
+            if prompt_index == 0
+            else COMIC_IMAGE_REWRITE_PROMPT_MAX_ATTEMPTS
+        )
         for capacity_attempt in range(1, max_capacity_attempts + 1):
             try:
                 image_bytes = await _call_hermes_image_api(
@@ -3062,6 +3078,37 @@ async def _queue_comic_chapter_page_regen_tasks(
         "chapter_number": chapter_number,
         "concurrency": _normalize_comic_page_concurrency(max_concurrency),
     }
+
+
+async def _execute_queued_comic_page_tasks(
+    project_id: str,
+    chapter_number: int,
+    tasks: list[dict[str, Any]],
+    user_id: str,
+    *,
+    max_concurrency: int | None = None,
+) -> None:
+    concurrency = min(_normalize_comic_page_concurrency(max_concurrency), max(len(tasks), 1))
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def _run_task(task: dict[str, Any]) -> None:
+        page_number = task.get("page_number")
+        if not isinstance(page_number, int):
+            return
+        prompt_path = str(task.get("prompt_path")) if task.get("prompt_path") else None
+        async with semaphore:
+            try:
+                await _execute_page_regen(project_id, chapter_number, page_number, prompt_path, user_id)
+            except Exception:
+                logger.exception(
+                    "漫画页后台并发执行异常: project=%s chapter=%s page=%s",
+                    project_id,
+                    chapter_number,
+                    page_number,
+                )
+
+    if tasks:
+        await asyncio.gather(*[_run_task(task) for task in tasks])
 
 
 async def _execute_comic_batch_generation(
@@ -3662,10 +3709,6 @@ async def regenerate_chapter_page(
             image_text_language=image_text_language,
         )
     failed_entry = failed_pages.get(page_number)
-    has_cos = bool(page_artifact and (page_artifact.image_cos_url or page_artifact.image_cos_object_key))
-    if not has_cos:
-        raise HTTPException(status_code=400, detail="当前页面还没有 COS 图片，请先生成漫画")
-
     if not chapter and not prompt_path and not failed_entry and page_artifact is None:
         raise HTTPException(status_code=404, detail="目标章节或页面不存在")
 
@@ -3723,12 +3766,17 @@ async def edit_chapter_page(
     if existing_task and existing_task.get("status") in {"queued", "running"}:
         return {"status": existing_task["status"], "task": existing_task, "detail": "该页面已有进行中的任务"}
 
-    # 标记任务状态
-    _update_regen_task_status(project_id, chapter_number, page_number, "queued")
+    chapter_map = await _get_project_chapter_map(project_id, db)
+    chapter = chapter_map.get(chapter_number)
+    task = await _build_regen_task(project_id, user_id, chapter_number, page_number, chapter, None, None, db)
+    task["target_type"] = "page_edit"
+    task["edit_prompt"] = payload.prompt
+    task["prompt_request_summary"] = payload.prompt[:120]
+    _enqueue_regen_task(project_id, task)
     background_tasks.add_task(_execute_page_edit, project_id, chapter_number, page_number, payload.prompt, user_id)
 
     logger.info("分镜改图已入队: project=%s chapter=%s page=%s", project_id, chapter_number, page_number)
-    return {"status": "queued", "detail": "改图任务已加入后台队列"}
+    return {"status": "queued", "task": task, "detail": "改图任务已加入后台队列"}
 
 
 @router.post(
@@ -3740,6 +3788,7 @@ async def regenerate_chapter_pages(
     project_id: str,
     request: Request,
     background_tasks: BackgroundTasks,
+    comic_page_concurrency: int | None = None,
     chapter_number: int = ApiPath(..., ge=1),
     db: AsyncSession = Depends(get_db),
 ):
@@ -3844,14 +3893,21 @@ async def regenerate_chapter_pages(
         _enqueue_regen_task(project_id, task)
         queued_tasks.append(task)
 
-        resolved_prompt_path = str(task.get("prompt_path")) if task.get("prompt_path") else None
-        background_tasks.add_task(_execute_page_regen, project_id, chapter_number, page_number, resolved_prompt_path, user_id)
+    background_tasks.add_task(
+        _execute_queued_comic_page_tasks,
+        project_id,
+        chapter_number,
+        queued_tasks,
+        user_id,
+        max_concurrency=_normalize_comic_page_concurrency(comic_page_concurrency),
+    )
 
     return {
         "status": "queued" if queued_tasks else "running",
         "chapter_number": chapter_number,
         "queued_count": len(queued_tasks),
         "skipped_pages": skipped_pages,
+        "concurrency": _normalize_comic_page_concurrency(comic_page_concurrency),
         "tasks": queued_tasks,
     }
 
@@ -4177,6 +4233,26 @@ async def _execute_full_pipeline_batch_generation(
                 ai_service.enable_mcp = False
             write_lock = await get_db_write_lock(user_id)
             last_generated_summary: str | None = None
+            comic_page_semaphore = asyncio.Semaphore(_normalize_comic_page_concurrency(comic_page_concurrency))
+            comic_page_jobs: list[asyncio.Task[None]] = []
+
+            async def _run_pipeline_comic_page(
+                *,
+                chapter_number: int,
+                page_number: int,
+                prompt_path: str | None,
+            ) -> None:
+                async with comic_page_semaphore:
+                    try:
+                        await _execute_page_regen(project_id, chapter_number, page_number, prompt_path, user_id)
+                    except Exception:
+                        logger.exception(
+                            "全流程漫画页异步生成异常: project=%s task=%s chapter=%s page=%s",
+                            project_id,
+                            task_id,
+                            chapter_number,
+                            page_number,
+                        )
 
             total_chapters = len(chapter_numbers)
             for index, chapter_number in enumerate(chapter_numbers, start=1):
@@ -4546,12 +4622,32 @@ async def _execute_full_pipeline_batch_generation(
                             project_id,
                             user_id,
                             context,
-                            run_inline=True,
+                            run_inline=False,
                             max_concurrency=comic_page_concurrency,
                         )
+                        for queued_task in comic_result.get("tasks", []):
+                            if not isinstance(queued_task, dict):
+                                continue
+                            queued_page_number = queued_task.get("page_number")
+                            if not isinstance(queued_page_number, int):
+                                continue
+                            comic_page_jobs.append(
+                                asyncio.create_task(
+                                    _run_pipeline_comic_page(
+                                        chapter_number=chapter_number,
+                                        page_number=queued_page_number,
+                                        prompt_path=str(queued_task.get("prompt_path")) if queued_task.get("prompt_path") else None,
+                                    )
+                                )
+                            )
                         chapter_result_entry["stage_results"]["comic"] = {
-                            "status": "completed",
+                            "status": "queued",
                             "queued_count": comic_result.get("queued_count", 0),
+                            "page_numbers": [
+                                queued_task.get("page_number")
+                                for queued_task in comic_result.get("tasks", [])
+                                if isinstance(queued_task, dict) and isinstance(queued_task.get("page_number"), int)
+                            ],
                             "skipped_pages": comic_result.get("skipped_pages", []),
                             "skipped_existing_pages": context.get("skipped_existing_pages", []),
                             "concurrency": comic_result.get("concurrency"),
@@ -4588,6 +4684,50 @@ async def _execute_full_pipeline_batch_generation(
                 task["completed"] = index
                 task["chapter_results"].append(chapter_result_entry)
                 task["current_stage"] = "chapter"
+                task["updated_at"] = _utc_now_iso()
+                _persist()
+
+            if comic_page_jobs:
+                task["current_stage"] = "comic"
+                task["current_chapter_number"] = None
+                task["current_retry_count"] = None
+                task["stages"]["comic"]["current_chapter_number"] = None
+                task["stages"]["comic"]["error_message"] = None
+                task["updated_at"] = _utc_now_iso()
+                _persist()
+                await asyncio.gather(*comic_page_jobs)
+                regen_state = _load_regen_state(project_id)
+                for chapter_result_entry in task.get("chapter_results", []):
+                    if not isinstance(chapter_result_entry, dict):
+                        continue
+                    comic_stage = chapter_result_entry.get("stage_results", {}).get("comic")
+                    if not isinstance(comic_stage, dict) or comic_stage.get("status") not in {"queued", "completed"}:
+                        continue
+                    chapter_number_for_result = chapter_result_entry.get("chapter_number")
+                    if not isinstance(chapter_number_for_result, int):
+                        continue
+                    page_numbers_for_result = [
+                        page_number
+                        for page_number in comic_stage.get("page_numbers", [])
+                        if isinstance(page_number, int)
+                    ]
+                    page_statuses = [
+                        (_latest_task_for_page(regen_state, chapter_number_for_result, page_number) or {}).get("status")
+                        for page_number in page_numbers_for_result
+                    ]
+                    completed_pages = sum(1 for page_status in page_statuses if page_status == "completed")
+                    failed_pages = sum(1 for page_status in page_statuses if page_status == "failed")
+                    running_pages = sum(1 for page_status in page_statuses if page_status in {"queued", "running"})
+                    comic_stage["page_status_summary"] = {
+                        "total": len(page_numbers_for_result),
+                        "completed": completed_pages,
+                        "failed": failed_pages,
+                        "running": running_pages,
+                    }
+                    if failed_pages > 0:
+                        comic_stage["status"] = "partial_failed" if completed_pages > 0 else "failed"
+                    elif page_numbers_for_result and completed_pages == len(page_numbers_for_result):
+                        comic_stage["status"] = "completed"
                 task["updated_at"] = _utc_now_iso()
                 _persist()
 

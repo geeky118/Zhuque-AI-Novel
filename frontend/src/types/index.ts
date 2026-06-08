@@ -726,6 +726,35 @@ export interface ComicContinuousReadResponse {
   updated_at?: string | null;
 }
 
+export interface ProjectBackgroundTask {
+  task_id: string;
+  type: string;
+  title: string;
+  status: string;
+  running: boolean;
+  total?: number | null;
+  completed?: number | null;
+  progress: number;
+  current?: string | null;
+  message?: string | null;
+  error_message?: string | null;
+  created_at?: string | null;
+  started_at?: string | null;
+  updated_at?: string | null;
+  completed_at?: string | null;
+  elapsed_seconds?: number | null;
+  details?: Record<string, unknown>;
+  errors?: unknown[];
+}
+
+export interface ProjectTaskSummaryResponse {
+  project_id: string;
+  running_count: number;
+  total_count: number;
+  updated_at: string;
+  tasks: ProjectBackgroundTask[];
+}
+
 // AI生成请求类型
 export interface GenerateOutlineRequest {
   project_id: string;

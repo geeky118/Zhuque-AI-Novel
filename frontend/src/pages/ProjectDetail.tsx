@@ -27,6 +27,7 @@ import { useCharacterSync, useOutlineSync, useChapterSync } from '../store/hooks
 import { bookImportApi, projectApi } from '../services/api';
 import type { BookImportFollowupStatus } from '../types';
 import ThemeSwitch from '../components/ThemeSwitch';
+import ProjectTaskDrawer from '../components/ProjectTaskDrawer';
 import { useThemeMode } from '../theme/useThemeMode';
 import { getStoredSidebarCollapsed, setStoredSidebarCollapsed } from '../utils/sidebarState';
 import { ZHUQUE_BRAND_NAME, zhuqueColors } from '../theme/zhuqueTokens';
@@ -617,6 +618,12 @@ export default function ProjectDetail() {
                 </div>
               ))}
             </div>
+            {currentProject.id && (
+              <ProjectTaskDrawer
+                projectId={currentProject.id}
+                alphaColor={alphaColor}
+              />
+            )}
           </div>
         )}
       </Header>

@@ -15,6 +15,9 @@ COMIC_IMAGE_RETRY_DETAIL_HINTS = (
     "too many requests",
     "rate limit",
     "appchatreverse",
+    "超时",
+    "繁忙",
+    "请稍后重试",
 )
 
 

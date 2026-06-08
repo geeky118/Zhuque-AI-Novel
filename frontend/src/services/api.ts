@@ -80,6 +80,7 @@ import type {
   ComicFullPipelineBatchStatusResponse,
   ComicContinuousReadResponse,
   ComicStoryboardState,
+  ProjectTaskSummaryResponse,
   TriggerAnalysisResponse,
 } from '../types';
 
@@ -1085,14 +1086,19 @@ export const comicApi = {
   ) =>
     api.put<unknown, ComicStoryboardState>(`/comics/projects/${projectId}/chapters/${chapterNumber}/storyboard`, data),
 
-  regenerateChapter: (projectId: string, chapterNumber: number) =>
+  regenerateChapter: (projectId: string, chapterNumber: number, comicPageConcurrency?: number) =>
     api.post<unknown, {
       status: string;
       chapter_number: number;
       queued_count: number;
       skipped_pages: number[];
+      concurrency?: number;
       tasks: Array<Record<string, unknown>>;
-    }>(`/comics/projects/${projectId}/chapters/${chapterNumber}/regenerate`),
+    }>(
+      `/comics/projects/${projectId}/chapters/${chapterNumber}/regenerate`,
+      undefined,
+      comicPageConcurrency ? { params: { comic_page_concurrency: comicPageConcurrency } } : undefined,
+    ),
 
   regeneratePage: (projectId: string, chapterNumber: number, pageNumber: number) =>
     api.post<unknown, {
@@ -1160,6 +1166,14 @@ export const comicApi = {
       result?: { page_count: number; panel_count: number };
       error?: string;
     }>(`/comics/projects/${projectId}/storyboard/generate-status/${taskId}`, withSilentRequest(options)),
+};
+
+export const projectTaskApi = {
+  getProjectTasks: (projectId: string, options?: RequestToastOptions) =>
+    api.get<unknown, ProjectTaskSummaryResponse>(
+      `/projects/${projectId}/tasks`,
+      withSilentRequest(options),
+    ),
 };
 
 export const writingStyleApi = {

@@ -142,7 +142,7 @@ from app.api import (
     mcp_plugins, admin, inspiration, prompt_templates,
     changelog, careers, foreshadows, prompt_workshop, book_import,
     comics, character_images,
-    project_covers
+    project_covers, project_tasks
 )
 
 app.include_router(auth.router, prefix="/api")
@@ -151,6 +151,7 @@ app.include_router(settings.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
 
 app.include_router(projects.router, prefix="/api")
+app.include_router(project_tasks.router, prefix="/api")
 app.include_router(project_covers.router, prefix="/api")
 app.include_router(wizard_stream.router, prefix="/api")
 app.include_router(inspiration.router, prefix="/api")

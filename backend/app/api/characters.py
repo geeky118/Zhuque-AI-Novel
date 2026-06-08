@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 import asyncio
 import json
+from datetime import datetime
 from typing import AsyncGenerator
 
 from app.database import get_db
@@ -1676,6 +1677,9 @@ async def _batch_update_visual_bible(project_id: str, user_id: str, overwrite: b
                 "total": len(characters),
                 "completed": 0,
                 "failed": 0,
+                "created_at": datetime.utcnow().isoformat(),
+                "started_at": datetime.utcnow().isoformat(),
+                "updated_at": datetime.utcnow().isoformat(),
             }
             logger.info("批量更新 visual_bible 开始: project_id=%s total=%d overwrite=%s", project_id, len(characters), overwrite)
 
@@ -1687,12 +1691,18 @@ async def _batch_update_visual_bible(project_id: str, user_id: str, overwrite: b
                         BIBLE_BATCH_STATE[task_key]["completed"] += 1
                     else:
                         BIBLE_BATCH_STATE[task_key]["failed"] += 1
+                    BIBLE_BATCH_STATE[task_key]["current_character_name"] = char.name
+                    BIBLE_BATCH_STATE[task_key]["updated_at"] = datetime.utcnow().isoformat()
                 except Exception:
                     BIBLE_BATCH_STATE[task_key]["failed"] += 1
+                    BIBLE_BATCH_STATE[task_key]["current_character_name"] = char.name
+                    BIBLE_BATCH_STATE[task_key]["updated_at"] = datetime.utcnow().isoformat()
                     logger.warning("角色 visual_bible 生成失败: char_id=%s", char.id, exc_info=True)
 
             await db.commit()
             BIBLE_BATCH_STATE[task_key]["status"] = "completed"
+            BIBLE_BATCH_STATE[task_key]["completed_at"] = datetime.utcnow().isoformat()
+            BIBLE_BATCH_STATE[task_key]["updated_at"] = datetime.utcnow().isoformat()
             logger.info(
                 "批量更新 visual_bible 完成: project_id=%s completed=%d failed=%d",
                 project_id, BIBLE_BATCH_STATE[task_key]["completed"], BIBLE_BATCH_STATE[task_key]["failed"],
@@ -1702,6 +1712,8 @@ async def _batch_update_visual_bible(project_id: str, user_id: str, overwrite: b
             task_key = f"bible_batch:{project_id}"
             if task_key in BIBLE_BATCH_STATE:
                 BIBLE_BATCH_STATE[task_key]["status"] = "failed"
+                BIBLE_BATCH_STATE[task_key]["completed_at"] = datetime.utcnow().isoformat()
+                BIBLE_BATCH_STATE[task_key]["updated_at"] = datetime.utcnow().isoformat()
 
 
 @router.post("/projects/{project_id}/visual-bible/batch-update", summary="批量为项目角色生成视觉圣经")

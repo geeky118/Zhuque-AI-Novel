@@ -262,6 +262,7 @@ export default function Chapters() {
   const [batchComicGenerating, setBatchComicGenerating] = useState(false);
   const [batchComicStartChapter, setBatchComicStartChapter] = useState(1);
   const [batchComicCount, setBatchComicCount] = useState(1);
+  const [batchComicConcurrency, setBatchComicConcurrency] = useState(2);
   const [batchComicTaskId, setBatchComicTaskId] = useState<string | null>(null);
   const [batchComicProgress, setBatchComicProgress] = useState<ComicBatchGenerateStatusResponse | null>(null);
   const batchComicPollRef = useRef<number | null>(null);
@@ -1847,7 +1848,7 @@ export default function Chapters() {
 
     try {
       setBatchComicGenerating(true);
-      const result = await comicApi.batchGenerateComics(currentProject.id, startChapterNumber, count);
+      const result = await comicApi.batchGenerateComics(currentProject.id, startChapterNumber, count, batchComicConcurrency);
       setBatchComicTaskId(result.task_id);
       setBatchComicProgress({
         task_id: result.task_id,
@@ -4096,6 +4097,18 @@ export default function Chapters() {
                   value={batchComicCount}
                   onChange={(value) => setBatchComicCount(value || 1)}
                   style={{ width: '100%' }}
+                />
+              </Space>
+              <Space direction="vertical" size={4} style={{ flex: 1 }}>
+                <span>漫画页并发</span>
+                <InputNumber
+                  min={1}
+                  max={6}
+                  precision={0}
+                  value={batchComicConcurrency}
+                  onChange={(value) => setBatchComicConcurrency(value || 2)}
+                  style={{ width: '100%' }}
+                  addonAfter="页"
                 />
               </Space>
             </div>
